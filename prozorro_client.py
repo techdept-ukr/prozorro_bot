@@ -45,108 +45,48 @@ class ProzorroClient:
     async def _resolve_tender_id(self, tender_ua_id: str) -> str:
         """Знаходить внутрішній хеш-ID за людським UA-... ID."""
 
-        # Варіант 1 — prozorro search API
+        # Варіант 1 — POST search API
         try:
             url = "https://prozorro.gov.ua/api/search/tenders"
-            async with self.session.get(url, params={"tenderId": tender_ua_id}) as resp:
-                logger.info(f"[V1] Search API status: {resp.status}")
+            payload = {"tenderId": tender_ua_id}
+            async with self.session.post(url, json=payload) as resp:
+                logger.info(f"[V1] POST Search status: {resp.status}")
                 text = await resp.text()
-                logger.info(f"[V1] Search API response: {text[:500]}")
+                logger.info(f"[V1] POST Search response: {text[:500]}")
                 if resp.status == 200:
                     data = await resp.json(content_type=None)
                     items = data.get("data", []) or data.get("items", [])
-                    if items:
-                        found_id = items[0].get("id")
-                        logger.info(f"[V1] Found internal ID: {found_id}")
-                        return found_id
+                    for item in items:
+                        if item.get("tenderID") == tender_ua_id:
+                            found_id = item.get("id")
+                            logger.info(f"[V1] Found: {found_id}")
+                            return found_id
         except Exception as e:
-            logger.warning(f"[V1] Search API failed: {e}")
+            logger.warning(f"[V1] failed: {e}")
 
-        # Варіант 2 — фільтрація по tenderID у публічному API
+        # Варіант 2 — пряме звернення через prozorro.gov.ua/api/tenders/UA-...
         try:
-            url2 = (
-                f"https://public.api.prozorro.gov.ua/api/2.5/tenders"
-                f"?opt_fields=tenderID&tenderID={tender_ua_id}"
-            )
+            url2 = f"https://prozorro.gov.ua/api/tenders/{tender_ua_id}"
             async with self.session.get(url2) as resp:
-                logger.info(f"[V2] Filter API status: {resp.status}")
+                logger.info(f"[V2] Direct status: {resp.status}")
                 text = await resp.text()
-                logger.info(f"[V2] Filter API response: {text[:500]}")
-                if resp.status == 200:
-                    data = await resp.json(content_type=None)
-                    items = data.get("data", [])
-                    if items:
-                        found_id = items[0].get("id")
-                        logger.info(f"[V2] Found internal ID: {found_id}")
-                        return found_id
-        except Exception as e:
-            logger.warning(f"[V2] Filter API failed: {e}")
-
-        # Варіант 3 — prozorro.gov.ua REST напряму
-        try:
-            url3 = f"https://prozorro.gov.ua/api/tenders/{tender_ua_id}"
-            async with self.session.get(url3) as resp:
-                logger.info(f"[V3] Direct API status: {resp.status}")
-                text = await resp.text()
-                logger.info(f"[V3] Direct API response: {text[:500]}")
+                logger.info(f"[V2] Direct response: {text[:500]}")
                 if resp.status == 200:
                     data = await resp.json(content_type=None)
                     found_id = data.get("data", {}).get("id")
                     if found_id:
-                        logger.info(f"[V3] Found internal ID: {found_id}")
+                        logger.info(f"[V2] Found: {found_id}")
                         return found_id
         except Exception as e:
-            logger.warning(f"[V3] Direct API failed: {e}")
+            logger.warning(f"[V2] failed: {e}")
 
-        # Варіант 4 — DoZorro API
+        # Варіант 3 — перебір сторінок публічного API з пошуком по tenderID
         try:
-            url4 = f"https://dozorro.org/api/tenders/{tender_ua_id}"
-            async with self.session.get(url4) as resp:
-                logger.info(f"[V4] DoZorro API status: {resp.status}")
-                text = await resp.text()
-                logger.info(f"[V4] DoZorro API response: {text[:500]}")
-                if resp.status == 200:
-                    data = await resp.json(content_type=None)
-                    found_id = data.get("id") or data.get("_id")
-                    if found_id:
-                        logger.info(f"[V4] Found internal ID: {found_id}")
-                        return found_id
-        except Exception as e:
-            logger.warning(f"[V4] DoZorro API failed: {e}")
-
-        raise ValueError(
-            f"Тендер '{tender_ua_id}' не знайдено жодним із методів.\n"
-            f"Перевір логи Railway — там буде видно відповідь API."
-        )
-
-    async def download_document(self, url: str) -> Optional[bytes]:
-        try:
-            async with self.session.get(url, allow_redirects=True) as resp:
-                if resp.status == 200:
-                    return await resp.read()
-                logger.warning(f"Failed to download doc: HTTP {resp.status} — {url}")
-                return None
-        except Exception as e:
-            logger.warning(f"Error downloading document {url}: {e}")
-            return None
-
-    async def get_tender_documents(self, tender: dict) -> list[dict]:
-        docs = []
-
-        for doc in tender.get("documents", []):
-            docs.append({**doc, "source": "замовник", "source_type": "tender"})
-
-        for bid in tender.get("bids", []):
-            bidder_name = bid.get("tenderers", [{}])[0].get("name", "Учасник")
-            for doc in bid.get("documents", []):
-                docs.append({**doc, "source": bidder_name, "source_type": "bid"})
-            for doc in bid.get("financialDocuments", []):
-                docs.append({**doc, "source": bidder_name, "source_type": "bid_financial"})
-            for doc in bid.get("eligibilityDocuments", []):
-                docs.append({**doc, "source": bidder_name, "source_type": "bid_eligibility"})
-
-        for award in tender.get("awards", []):
-            for doc in award.get("documents", []):
-                docs.append({**doc, "source": "рішення", "source_type": "award"})
-
-        return docs
+            url3 = "https://public.api.prozorro.gov.ua/api/2.5/tenders"
+            params = {"descending": "1", "limit": "100", "opt_fields": "tenderID"}
+            # Шукаємо у свіжих тендерах (останні 3 сторінки)
+            offset = None
+            for page in range(3):
+                if offset:
+                    params["offset"] = offset
+                async with self.session.get(
