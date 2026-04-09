@@ -18,7 +18,7 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 analyzer = TenderAnalyzer(anthropic_api_key=ANTHROPIC_API_KEY)
 
 PROZORRO_URL_PATTERN = re.compile(
-    r'prozorro\.gov\.ua/tender/([A-Za-z0-9]+)'
+    r'prozorro\.gov\.ua/(?:uk/|en/)?tender/([A-Za-z0-9\-]+)'
 )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
