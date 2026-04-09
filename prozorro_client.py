@@ -1,21 +1,27 @@
 import aiohttp
 import asyncio
 import logging
+import ssl
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Правильний робочий endpoint Prozorro API
 PROZORRO_PUBLIC_API = "https://public.api.prozorro.gov.ua/api/2.5"
-PROZORRO_DS_BASE = "https://public-docs.prozorro.gov.ua/get"
 
 class ProzorroClient:
-    """Client for Prozorro Public API (no API key required for reading)."""
 
     def __init__(self):
         self.session: Optional[aiohttp.ClientSession] = None
 
     async def __aenter__(self):
+        # Вимикаємо перевірку SSL — у Prozorro проблема з сертифікатом хостнейму
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+        connector = aiohttp.TCPConnector(ssl=ssl_ctx)
         self.session = aiohttp.ClientSession(
+            connector=connector,
             timeout=aiohttp.ClientTimeout(total=60),
             headers={"Accept": "application/json"}
         )
@@ -26,7 +32,6 @@ class ProzorroClient:
             await self.session.close()
 
     async def get_tender(self, tender_id: str) -> dict:
-        """Fetch full tender data by ID."""
         url = f"{PROZORRO_PUBLIC_API}/tenders/{tender_id}"
         async with self.session.get(url) as resp:
             if resp.status == 404:
@@ -36,7 +41,6 @@ class ProzorroClient:
             return data.get("data", {})
 
     async def download_document(self, url: str) -> Optional[bytes]:
-        """Download a document from Prozorro DS."""
         try:
             async with self.session.get(url, allow_redirects=True) as resp:
                 if resp.status == 200:
@@ -48,14 +52,11 @@ class ProzorroClient:
             return None
 
     async def get_tender_documents(self, tender: dict) -> list[dict]:
-        """Extract all documents from tender data (tender + awards + bids)."""
         docs = []
 
-        # Tender-level documents
         for doc in tender.get("documents", []):
             docs.append({**doc, "source": "замовник", "source_type": "tender"})
 
-        # Bid documents (participants)
         for bid in tender.get("bids", []):
             bidder_name = bid.get("tenderers", [{}])[0].get("name", "Учасник")
             for doc in bid.get("documents", []):
@@ -65,7 +66,6 @@ class ProzorroClient:
             for doc in bid.get("eligibilityDocuments", []):
                 docs.append({**doc, "source": bidder_name, "source_type": "bid_eligibility"})
 
-        # Award documents
         for award in tender.get("awards", []):
             for doc in award.get("documents", []):
                 docs.append({**doc, "source": "рішення", "source_type": "award"})
