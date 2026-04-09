@@ -48,15 +48,19 @@ class ProzorroClient:
     async def _resolve_tender_id(self, tender_ua_id: str) -> str:
         """Знаходить внутрішній хеш-ID за людським UA-... ID."""
 
-        # Варіант 1 — POST search API prozorro.gov.ua
+      # Варіант 1 — POST search API prozorro.gov.ua
         try:
             url = "https://prozorro.gov.ua/api/search/tenders"
             async with self.session.post(url, json={"tenderId": tender_ua_id}) as resp:
                 logger.info(f"[V1] POST Search status: {resp.status}")
+                text = await resp.text()
+                logger.info(f"[V1] ПОВНА відповідь: {text[:2000]}")  # збільшили ліміт
                 if resp.status == 200:
                     data = await resp.json(content_type=None)
-                    items = data.get("data", []) or data.get("items", [])
+                    items = data.get("data", []) or data.get("items", []) or data.get("tenders", [])
+                    logger.info(f"[V1] Кількість items: {len(items)}")
                     for item in items:
+                        logger.info(f"[V1] item keys: {list(item.keys())}, tenderID={item.get('tenderID')}")
                         if item.get("tenderID") == tender_ua_id:
                             found_id = item.get("id")
                             logger.info(f"[V1] Found: {found_id}")
