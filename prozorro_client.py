@@ -89,4 +89,72 @@ class ProzorroClient:
             for page in range(3):
                 if offset:
                     params["offset"] = offset
-                async with self.session.get(
+                async with self.session.get(url3, params=params) as resp:
+                    if resp.status != 200:
+                        break
+                    data = await resp.json(content_type=None)
+                    items = data.get("data", [])
+                    logger.info(f"[V3] Page {page+1}: {len(items)} items")
+                    for item in items:
+                        if item.get("tenderID") == tender_ua_id:
+                            found_id = item.get("id")
+                            logger.info(f"[V3] Found: {found_id}")
+                            return found_id
+                    next_page = data.get("next_page", {})
+                    offset = next_page.get("offset")
+                    if not offset:
+                        break
+        except Exception as e:
+            logger.warning(f"[V3] failed: {e}")
+
+        # Варіант 4 — prozorro search через інший endpoint
+        try:
+            url4 = "https://prozorro.gov.ua/api/tenders"
+            params4 = {"tenderId": tender_ua_id, "limit": "1"}
+            async with self.session.get(url4, params=params4) as resp:
+                logger.info(f"[V4] status: {resp.status}")
+                text = await resp.text()
+                logger.info(f"[V4] response: {text[:500]}")
+                if resp.status == 200:
+                    data = await resp.json(content_type=None)
+                    items = data.get("data", []) or data.get("items", [])
+                    for item in items:
+                        if item.get("tenderID") == tender_ua_id:
+                            found_id = item.get("id")
+                            logger.info(f"[V4] Found: {found_id}")
+                            return found_id
+        except Exception as e:
+            logger.warning(f"[V4] failed: {e}")
+
+        raise ValueError(
+            f"Тендер '{tender_ua_id}' не знайдено жодним із методів.\n"
+            f"Перевір логи Railway."
+        )
+
+    async def download_document(self, url: str) -> Optional[bytes]:
+        try:
+            async with self.session.get(url, allow_redirects=True) as resp:
+                if resp.status == 200:
+                    return await resp.read()
+                logger.warning(f"Failed to download doc: HTTP {resp.status} — {url}")
+                return None
+        except Exception as e:
+            logger.warning(f"Error downloading document {url}: {e}")
+            return None
+
+    async def get_tender_documents(self, tender: dict) -> list[dict]:
+        docs = []
+        for doc in tender.get("documents", []):
+            docs.append({**doc, "source": "замовник", "source_type": "tender"})
+        for bid in tender.get("bids", []):
+            bidder_name = bid.get("tenderers", [{}])[0].get("name", "Учасник")
+            for doc in bid.get("documents", []):
+                docs.append({**doc, "source": bidder_name, "source_type": "bid"})
+            for doc in bid.get("financialDocuments", []):
+                docs.append({**doc, "source": bidder_name, "source_type": "bid_financial"})
+            for doc in bid.get("eligibilityDocuments", []):
+                docs.append({**doc, "source": bidder_name, "source_type": "bid_eligibility"})
+        for award in tender.get("awards", []):
+            for doc in award.get("documents", []):
+                docs.append({**doc, "source": "рішення", "source_type": "award"})
+        return docs
