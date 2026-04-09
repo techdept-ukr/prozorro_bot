@@ -1,6 +1,7 @@
 import aiohttp
 import logging
 import ssl
+import datetime
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -40,115 +41,89 @@ class ProzorroClient:
             resp.raise_for_status()
             data = await resp.json(content_type=None)
             result = data.get("data", {})
-            logger.info(f"Fetched tender tenderID={result.get('tenderID')}")
+
+            # КРИТИЧНА ПЕРЕВІРКА — переконуємось що це саме той тендер
+            actual_tender_id = result.get("tenderID", "")
+            if tender_id.startswith("UA-") and actual_tender_id != tender_id:
+                raise ValueError(
+                    f"Помилка: запитували тендер '{tender_id}', "
+                    f"але API повернув '{actual_tender_id}'. "
+                    f"Внутрішній ID: {internal_id}"
+                )
+
+            logger.info(f"✅ Підтверджено: tenderID={actual_tender_id}, internal={internal_id}")
             return result
 
     async def _resolve_tender_id(self, tender_ua_id: str) -> str:
-        """Знаходить внутрішній хеш-ID за людським UA-... ID."""
+        """Знаходить внутрішній хеш-ID за людським UA-YYYY-MM-DD-XXXXXX-a."""
 
-        # Варіант 1 — POST search з query по точному tenderID
+        # Витягуємо дату з ID: UA-2026-03-12-014166-a -> 2026-03-12
         try:
-            url = "https://prozorro.gov.ua/api/search/tenders"
-            # Пробуємо різні поля запиту
-            for payload in [
-                {"query": tender_ua_id},
-                {"tenderId": tender_ua_id},
-                {"tenderID": tender_ua_id},
-                {"id": tender_ua_id},
-            ]:
-                async with self.session.post(url, json=payload) as resp:
-                    if resp.status == 200:
+            parts = tender_ua_id.split("-")
+            # формат: UA - YYYY - MM - DD - NUMBER - a
+            year, month, day = parts[1], parts[2], parts[3]
+            date_str = f"{year}-{month}-{day}"
+            target_date = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+            logger.info(f"Шукаємо тендер {tender_ua_id}, дата: {date_str}")
+        except Exception as e:
+            raise ValueError(f"Не вдалося розпарсити дату з ID '{tender_ua_id}': {e}")
+
+        # Шукаємо по публічному API з offset по даті
+        # Перебираємо сторінки навколо дати публікації
+        url = "https://public.api.prozorro.gov.ua/api/2.5/tenders"
+
+        # Спробуємо offset = timestamp початку дня
+        offsets_to_try = [
+            target_date.timestamp(),
+            (target_date + datetime.timedelta(days=1)).timestamp(),
+            (target_date - datetime.timedelta(days=1)).timestamp(),
+            (target_date + datetime.timedelta(days=2)).timestamp(),
+            (target_date - datetime.timedelta(days=2)).timestamp(),
+        ]
+
+        for start_offset in offsets_to_try:
+            try:
+                params = {
+                    "offset": str(start_offset),
+                    "limit": "100",
+                    "opt_fields": "tenderID",
+                }
+                offset = start_offset
+                for page in range(8):
+                    params["offset"] = str(offset)
+                    async with self.session.get(url, params=params) as resp:
+                        if resp.status != 200:
+                            break
                         data = await resp.json(content_type=None)
                         items = data.get("data", [])
-                        logger.info(f"[V1] payload={payload}, items={len(items)}, перший tenderID={items[0].get('tenderID') if items else 'none'}")
-                        for item in items:
-                            if item.get("tenderID") == tender_ua_id:
-                                found_id = item.get("id")
-                                logger.info(f"[V1] Знайдено! id={found_id}")
-                                return found_id
-        except Exception as e:
-            logger.warning(f"[V1] failed: {e}")
-
-        # Варіант 2 — публічний API з сортуванням по даті тендера (не dateModified)
-        # UA-2026-03-12-014166-a -> дата 2026-03-12, шукаємо навколо неї
-        try:
-            # Витягуємо дату з tenderID: UA-YYYY-MM-DD-...
-            parts = tender_ua_id.split("-")
-            # UA + рік + місяць + день = індекси 1,2,3
-            date_str = f"{parts[1]}-{parts[2]}-{parts[3]}"
-            logger.info(f"[V2] Шукаємо тендер від дати: {date_str}")
-
-            # Беремо offset від дати публікації
-            import datetime
-            target_date = datetime.datetime.strptime(date_str, "%Y-%m-%d")
-            # offset в секундах від epoch
-            offset_ts = target_date.timestamp()
-
-            url2 = "https://public.api.prozorro.gov.ua/api/2.5/tenders"
-            # Шукаємо з offset трохи раніше дати тендера
-            params = {
-                "offset": str(offset_ts),
-                "limit": "100",
-                "opt_fields": "tenderID",
-            }
-            async with self.session.get(url2, params=params) as resp:
-                logger.info(f"[V2] status: {resp.status}")
-                if resp.status == 200:
-                    data = await resp.json(content_type=None)
-                    items = data.get("data", [])
-                    logger.info(f"[V2] items: {len(items)}, перший: {items[0].get('tenderID') if items else 'none'}")
-                    for item in items:
-                        if item.get("tenderID") == tender_ua_id:
-                            found_id = item.get("id")
-                            logger.info(f"[V2] Знайдено! id={found_id}")
-                            return found_id
-                    # Беремо ще кілька сторінок навколо цієї дати
-                    next_offset = data.get("next_page", {}).get("offset")
-                    for _ in range(5):
-                        if not next_offset:
+                        if not items:
                             break
-                        params["offset"] = str(next_offset)
-                        async with self.session.get(url2, params=params) as resp2:
-                            if resp2.status != 200:
-                                break
-                            data2 = await resp2.json(content_type=None)
-                            items2 = data2.get("data", [])
-                            logger.info(f"[V2+] items: {len(items2)}, перший: {items2[0].get('tenderID') if items2 else 'none'}")
-                            for item in items2:
-                                if item.get("tenderID") == tender_ua_id:
-                                    found_id = item.get("id")
-                                    logger.info(f"[V2+] Знайдено! id={found_id}")
-                                    return found_id
-                            next_offset = data2.get("next_page", {}).get("offset")
-        except Exception as e:
-            logger.warning(f"[V2] failed: {e}")
 
-        # Варіант 3 — GET prozorro.gov.ua з query параметром
-        try:
-            url3 = "https://prozorro.gov.ua/api/tenders"
-            for params in [
-                {"tenderId": tender_ua_id},
-                {"tenderID": tender_ua_id},
-                {"query": tender_ua_id},
-            ]:
-                async with self.session.get(url3, params=params) as resp:
-                    logger.info(f"[V3] params={params}, status={resp.status}")
-                    text = await resp.text()
-                    logger.info(f"[V3] response: {text[:300]}")
-                    if resp.status == 200:
-                        data = await resp.json(content_type=None)
-                        items = data.get("data", []) or data.get("items", [])
+                        first_id = items[0].get("tenderID", "")
+                        last_id = items[-1].get("tenderID", "")
+                        logger.info(f"offset={offset:.0f} | {first_id} ... {last_id}")
+
                         for item in items:
                             if item.get("tenderID") == tender_ua_id:
                                 found_id = item.get("id")
-                                logger.info(f"[V3] Знайдено! id={found_id}")
+                                logger.info(f"✅ Знайдено! {tender_ua_id} → {found_id}")
                                 return found_id
-        except Exception as e:
-            logger.warning(f"[V3] failed: {e}")
+
+                        next_offset = data.get("next_page", {}).get("offset")
+                        if not next_offset or next_offset == offset:
+                            break
+                        offset = next_offset
+
+            except Exception as e:
+                logger.warning(f"offset {start_offset} failed: {e}")
+                continue
 
         raise ValueError(
-            f"Тендер '{tender_ua_id}' не знайдено.\n"
-            f"Деталі в логах Railway."
+            f"❌ Тендер '{tender_ua_id}' не знайдено в Prozorro API.\n\n"
+            f"Можливі причини:\n"
+            f"• Тендер видалено або скасовано\n"
+            f"• Тендер не пройшов публікацію\n"
+            f"• Спробуй ще раз через кілька хвилин"
         )
 
     async def download_document(self, url: str) -> Optional[bytes]:
