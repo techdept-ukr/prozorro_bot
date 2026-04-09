@@ -1,5 +1,4 @@
 import aiohttp
-import asyncio
 import logging
 import ssl
 from typing import Optional
@@ -40,19 +39,20 @@ class ProzorroClient:
                 raise ValueError(f"Тендер '{tender_id}' не знайдено в API")
             resp.raise_for_status()
             data = await resp.json(content_type=None)
-            return data.get("data", {})
+            result = data.get("data", {})
+            # Перевіряємо що це дійсно потрібний тендер
+            actual_id = result.get("tenderID", "")
+            logger.info(f"Fetched tender tenderID={actual_id}, requested={tender_id}")
+            return result
 
     async def _resolve_tender_id(self, tender_ua_id: str) -> str:
         """Знаходить внутрішній хеш-ID за людським UA-... ID."""
 
-        # Варіант 1 — POST search API
+        # Варіант 1 — POST search API prozorro.gov.ua
         try:
             url = "https://prozorro.gov.ua/api/search/tenders"
-            payload = {"tenderId": tender_ua_id}
-            async with self.session.post(url, json=payload) as resp:
+            async with self.session.post(url, json={"tenderId": tender_ua_id}) as resp:
                 logger.info(f"[V1] POST Search status: {resp.status}")
-                text = await resp.text()
-                logger.info(f"[V1] POST Search response: {text[:500]}")
                 if resp.status == 200:
                     data = await resp.json(content_type=None)
                     items = data.get("data", []) or data.get("items", [])
@@ -64,13 +64,13 @@ class ProzorroClient:
         except Exception as e:
             logger.warning(f"[V1] failed: {e}")
 
-        # Варіант 2 — пряме звернення через prozorro.gov.ua/api/tenders/UA-...
+        # Варіант 2 — GET prozorro.gov.ua/api/tenders/UA-...
         try:
             url2 = f"https://prozorro.gov.ua/api/tenders/{tender_ua_id}"
             async with self.session.get(url2) as resp:
                 logger.info(f"[V2] Direct status: {resp.status}")
                 text = await resp.text()
-                logger.info(f"[V2] Direct response: {text[:500]}")
+                logger.info(f"[V2] response: {text[:300]}")
                 if resp.status == 200:
                     data = await resp.json(content_type=None)
                     found_id = data.get("data", {}).get("id")
@@ -80,13 +80,12 @@ class ProzorroClient:
         except Exception as e:
             logger.warning(f"[V2] failed: {e}")
 
-        # Варіант 3 — перебір сторінок публічного API з пошуком по tenderID
+        # Варіант 3 — перебір сторінок з точною перевіркою tenderID
         try:
             url3 = "https://public.api.prozorro.gov.ua/api/2.5/tenders"
             params = {"descending": "1", "limit": "100", "opt_fields": "tenderID"}
-            # Шукаємо у свіжих тендерах (останні 3 сторінки)
             offset = None
-            for page in range(3):
+            for page in range(10):  # до 1000 тендерів
                 if offset:
                     params["offset"] = offset
                 async with self.session.get(url3, params=params) as resp:
@@ -94,41 +93,26 @@ class ProzorroClient:
                         break
                     data = await resp.json(content_type=None)
                     items = data.get("data", [])
-                    logger.info(f"[V3] Page {page+1}: {len(items)} items")
+                    logger.info(f"[V3] Page {page+1}: {len(items)} items, перший: {items[0].get('tenderID') if items else 'none'}")
                     for item in items:
                         if item.get("tenderID") == tender_ua_id:
                             found_id = item.get("id")
-                            logger.info(f"[V3] Found: {found_id}")
+                            logger.info(f"[V3] Точний збіг! tenderID={tender_ua_id} → id={found_id}")
                             return found_id
                     next_page = data.get("next_page", {})
                     offset = next_page.get("offset")
                     if not offset:
                         break
+                    # Якщо перший тендер на сторінці вже старший за наш — зупиняємось
+                    if items and items[0].get("tenderID", "") < tender_ua_id:
+                        logger.info(f"[V3] Пройшли дату тендера, зупиняємось")
+                        break
         except Exception as e:
             logger.warning(f"[V3] failed: {e}")
 
-        # Варіант 4 — prozorro search через інший endpoint
-        try:
-            url4 = "https://prozorro.gov.ua/api/tenders"
-            params4 = {"tenderId": tender_ua_id, "limit": "1"}
-            async with self.session.get(url4, params=params4) as resp:
-                logger.info(f"[V4] status: {resp.status}")
-                text = await resp.text()
-                logger.info(f"[V4] response: {text[:500]}")
-                if resp.status == 200:
-                    data = await resp.json(content_type=None)
-                    items = data.get("data", []) or data.get("items", [])
-                    for item in items:
-                        if item.get("tenderID") == tender_ua_id:
-                            found_id = item.get("id")
-                            logger.info(f"[V4] Found: {found_id}")
-                            return found_id
-        except Exception as e:
-            logger.warning(f"[V4] failed: {e}")
-
         raise ValueError(
-            f"Тендер '{tender_ua_id}' не знайдено жодним із методів.\n"
-            f"Перевір логи Railway."
+            f"Тендер '{tender_ua_id}' не знайдено.\n"
+            f"Перевір логи Railway — там видно що повертає API."
         )
 
     async def download_document(self, url: str) -> Optional[bytes]:
