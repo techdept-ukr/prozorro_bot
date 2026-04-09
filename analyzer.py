@@ -202,7 +202,7 @@ ID: {t.get('id', '')}
 
     async def _analyze_customer(self, tender: dict, doc_texts: dict) -> str:
         context = self._build_context(tender, doc_texts)
-        prompt = f"""{context}
+        prompt = f"""{context} ВАЖЛИВО: Аналізуй ТІЛЬКИ інформацію яка є в даних вище. Не вигадуй і не додавай інформацію з інших джерел. Якщо даних немає — так і пиши "інформація відсутня в тендері".
 
 ---
 Ти — досвідчений аналітик публічних закупівель України.
@@ -240,7 +240,7 @@ ID: {t.get('id', '')}
 
     async def _analyze_procurement(self, tender: dict, doc_texts: dict) -> str:
         context = self._build_context(tender, doc_texts)
-        prompt = f"""{context}
+        prompt = f"""{context} ВАЖЛИВО: Аналізуй ТІЛЬКИ інформацію яка є в даних вище. Не вигадуй і не додавай інформацію з інших джерел. Якщо даних немає — так і пиши "інформація відсутня в тендері".
 
 ---
 Ти — досвідчений аналітик ринку та публічних закупівель.
@@ -281,7 +281,7 @@ ID: {t.get('id', '')}
 
     async def _analyze_participants(self, tender: dict, doc_texts: dict) -> str:
         context = self._build_context(tender, doc_texts)
-        prompt = f"""{context}
+        prompt = f"""{context} ВАЖЛИВО: Аналізуй ТІЛЬКИ інформацію яка є в даних вище. Не вигадуй і не додавай інформацію з інших джерел. Якщо даних немає — так і пиши "інформація відсутня в тендері".
 
 ---
 Ти — досвідчений аналітик ділової репутації та публічних закупівель.
