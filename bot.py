@@ -101,7 +101,11 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyze_tender))
 
     logger.info("Бот запущено...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(
+    allowed_updates=Update.ALL_TYPES,
+    drop_pending_updates=True,
+    close_loop=False
+)
 
 if __name__ == '__main__':
     main()
