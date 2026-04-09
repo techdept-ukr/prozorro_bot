@@ -6,9 +6,6 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Актуальний робочий endpoint
-PROZORRO_PUBLIC_API = "https://prozorro.gov.ua/api/2.5"
-
 class ProzorroClient:
 
     def __init__(self):
@@ -31,28 +28,69 @@ class ProzorroClient:
             await self.session.close()
 
     async def get_tender(self, tender_id: str) -> dict:
-        # Спробуємо кілька endpoints по черзі
-        urls = [
-            f"https://prozorro.gov.ua/api/2.5/tenders/{tender_id}",
-            f"https://public.api.prozorro.gov.ua/api/2.5/tenders/{tender_id}",
-            f"https://api.prozorro.gov.ua/api/2.5/tenders/{tender_id}",
-        ]
-        last_error = None
-        for url in urls:
-            try:
-                async with self.session.get(url) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data.get("data", {})
-                    elif resp.status == 404:
-                        raise ValueError(f"Тендер '{tender_id}' не знайдено")
-            except ValueError:
-                raise
-            except Exception as e:
-                last_error = e
-                logger.warning(f"Failed {url}: {e}")
-                continue
-        raise Exception(f"Не вдалося підключитись до Prozorro API: {last_error}")
+        """
+        tender_id може бути:
+        - UA-2026-03-12-014166-a  (людський ID з URL)
+        - або внутрішній хеш (32 символи)
+        """
+        # Якщо це людський ID (UA-...) — шукаємо через search API
+        if tender_id.startswith("UA-"):
+            internal_id = await self._resolve_tender_id(tender_id)
+        else:
+            internal_id = tender_id
+
+        url = f"https://public.api.prozorro.gov.ua/api/2.5/tenders/{internal_id}"
+        async with self.session.get(url) as resp:
+            if resp.status == 404:
+                raise ValueError(f"Тендер '{tender_id}' не знайдено в API")
+            resp.raise_for_status()
+            data = await resp.json()
+            return data.get("data", {})
+
+    async def _resolve_tender_id(self, tender_ua_id: str) -> str:
+        """Знаходить внутрішній хеш-ID за людським UA-... ID через пошук."""
+        # Prozorro search API
+        search_url = "https://prozorro.gov.ua/api/search/tenders"
+        params = {"tenderId": tender_ua_id}
+        
+        try:
+            async with self.session.get(search_url, params=params) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    items = data.get("data", []) or data.get("items", [])
+                    if items:
+                        return items[0].get("id", tender_ua_id)
+        except Exception as e:
+            logger.warning(f"Search API failed: {e}")
+
+        # Запасний варіант — пряме звернення через prozorro.gov.ua
+        try:
+            url2 = f"https://prozorro.gov.ua/api/tenders/{tender_ua_id}"
+            async with self.session.get(url2) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("data", {}).get("id", tender_ua_id)
+        except Exception as e:
+            logger.warning(f"Direct API failed: {e}")
+
+        # Ще один запасний — DoZorro / BI API
+        try:
+            bi_url = f"https://bi.prozorro.org/api/tenders/{tender_ua_id}"
+            async with self.session.get(bi_url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    internal = data.get("id") or data.get("_id")
+                    if internal:
+                        return internal
+        except Exception as e:
+            logger.warning(f"BI API failed: {e}")
+
+        # Якщо нічого не знайшли — повертаємо як є
+        raise ValueError(
+            f"Тендер '{tender_ua_id}' не знайдено.\n\n"
+            f"Спробуй відкрити тендер на prozorro.gov.ua, "
+            f"натисни F12 → Network → знайди запит до API → скопіюй внутрішній ID (32 символи)"
+        )
 
     async def download_document(self, url: str) -> Optional[bytes]:
         try:
